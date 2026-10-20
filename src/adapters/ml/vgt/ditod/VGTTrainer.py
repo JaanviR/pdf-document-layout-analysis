@@ -248,10 +248,7 @@ def default_setup(cfg, args):
     seed = _try_get_key(cfg, "SEED", "train.seed", default=-1)
     seed_all_rng(None if seed < 0 else seed + rank)
 
-    # cudnn benchmark has large overhead. It shouldn't be used considering the small size of
-    # typical validation set.
-    if not (hasattr(args, "eval_only") and args.eval_only):
-        torch.backends.cudnn.benchmark = _try_get_key(cfg, "CUDNN_BENCHMARK", "train.cudnn_benchmark", default=False)
+    torch.backends.cudnn.benchmark = _try_get_key(cfg, "CUDNN_BENCHMARK", "train.cudnn_benchmark", default=True)
 
 
 def default_writers(output_dir: str, max_iter: Optional[int] = None):
@@ -653,9 +650,11 @@ class VGTTrainer(TrainerBase):
         Overwrite it if you'd like a different data loader.
         """
         mapper = DetrDatasetMapper(cfg, is_train=False)
-        return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
-
-        # return build_detection_test_loader(cfg, dataset_name)
+        batch_size = int(os.environ.get("INFERENCE_BATCH_SIZE", "1"))
+        num_workers = int(os.environ.get("INFERENCE_NUM_WORKERS", "0"))
+        return build_detection_test_loader(
+            cfg, dataset_name, mapper=mapper, batch_size=batch_size, num_workers=num_workers,
+        )
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):

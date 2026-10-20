@@ -42,6 +42,9 @@ services:
     environment:
       - RESTART_IF_NO_GPU=$RESTART_IF_NO_GPU
       - OLLAMA_HOST=http://ollama-gpu:11434
+      - INFERENCE_BATCH_SIZE=4
+      - INFERENCE_NUM_WORKERS=2
+      - CUDA_AMP=true
     networks:
       - pdf-analysis-network
 

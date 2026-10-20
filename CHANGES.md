@@ -8,6 +8,34 @@
 - Run python -m pytest src/tests/test_end_to_end.py -v inside the container
 - Watch especially for test_analyze_concurrent_requests_do_not_corrupt — that's the test that proves isolation works
 
+## Test 2
+# Step 1: Run with AMP OFF
+# In docker-compose-gpu.yml set CUDA_AMP=false, then:
+docker compose -f docker-compose-gpu.yml up -d
+curl -X POST http://localhost:5060/analyze -F "file=@yourtest.pdf" > results_no_amp.json
+
+# Step 2: Run with AMP ON
+# In docker-compose-gpu.yml set CUDA_AMP=true, then:
+docker compose -f docker-compose-gpu.yml up -d
+curl -X POST http://localhost:5060/analyze -F "file=@yourtest.pdf" > results_amp.json
+
+# Step 3: Compare
+python compare_amp_results.py results_no_amp.json results_amp.json
+
+What the script checks:
+
+Same number of segments on each page
+Same type labels (table, heading, text, etc.) — the critical one
+Same text content in each segment
+Bounding boxes within 2px tolerance (float16 rounding noise)
+Output is one of three verdicts:
+
+PASS — identical results, AMP is safe to use
+WARNING — same segments and text, but boxes shifted more than expected
+FAIL — AMP actually changed labels or missed segments, disable it
+No external dependencies — just Python's built-in json and sys.
+
+
 ## The Problem
 
 When your RAG agent sends multiple PDFs to Huridocs for processing, they queue up and process one at a time. An 800-page book takes ~4 hours on GPU, so if you send 2 books, the second one waits 4 hours before it even starts — total ~8 hours.
@@ -478,3 +506,133 @@ All new parameters default to `None`, which falls back to the old global paths. 
 - The Gradio GUI app still works without changes
 - Existing tests still work without changes
 - Any code that calls these functions without the new parameters behaves exactly as before
+
+---
+
+# Phase 2: Inference Speed Optimizations
+
+## The Problem
+
+Even with document isolation, each individual document still processes slowly. The VGT model processes pages one at a time (batch size = 1), the GPU auto-tuning is disabled during inference, and the model uses full 32-bit floating point for every computation. These are all wasted opportunities to speed things up.
+
+## The Changes
+
+### 1. Configurable Batch Size — `src/adapters/ml/vgt/ditod/VGTTrainer.py` (line 644-657)
+
+**What changed:** The `build_test_loader` method now reads two environment variables:
+- `INFERENCE_BATCH_SIZE` (default: `"1"`) — how many pages to process at once
+- `INFERENCE_NUM_WORKERS` (default: `"0"`) — how many CPU threads to use for loading/preparing data
+
+**Before:**
+```python
+@classmethod
+def build_test_loader(cls, cfg, dataset_name):
+    mapper = DetrDatasetMapper(cfg, is_train=False)
+    return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
+```
+
+**After:**
+```python
+@classmethod
+def build_test_loader(cls, cfg, dataset_name):
+    mapper = DetrDatasetMapper(cfg, is_train=False)
+    batch_size = int(os.environ.get("INFERENCE_BATCH_SIZE", "1"))
+    num_workers = int(os.environ.get("INFERENCE_NUM_WORKERS", "0"))
+    return build_detection_test_loader(
+        cfg, dataset_name, mapper=mapper, batch_size=batch_size, num_workers=num_workers,
+    )
+```
+
+**Why:** The GPU has hundreds of cores but processes only one page at a time by default. Batching means the GPU processes 4 pages simultaneously — the same cores that were sitting idle now work on multiple pages. This doesn't use much more memory or time per batch, but you get 4 pages done instead of 1. For an 800-page PDF, this means ~200 batches instead of 800 individual passes.
+
+`INFERENCE_NUM_WORKERS=2` means 2 CPU threads prepare the next batch of data (loading images, creating tensors) while the GPU is busy processing the current batch. Without this, the GPU waits for the CPU to prepare each batch.
+
+**Controlled by environment variables** so you can tune it without changing code. Set `INFERENCE_BATCH_SIZE=4` in `docker-compose-gpu.yml`.
+
+### 2. cudnn.benchmark Enabled — `src/adapters/ml/vgt/ditod/VGTTrainer.py` (line 251)
+
+**What changed:** `torch.backends.cudnn.benchmark` is now always enabled (default `True`), including during inference.
+
+**Before:**
+```python
+if not (hasattr(args, "eval_only") and args.eval_only):
+    torch.backends.cudnn.benchmark = _try_get_key(cfg, "CUDNN_BENCHMARK", "train.cudnn_benchmark", default=False)
+```
+
+**After:**
+```python
+torch.backends.cudnn.benchmark = _try_get_key(cfg, "CUDNN_BENCHMARK", "train.cudnn_benchmark", default=True)
+```
+
+**Why:** `cudnn.benchmark` tells the GPU library (cuDNN) to auto-tune which low-level algorithm to use for convolution operations. It tries a few different algorithms and picks the fastest one for the specific input size. This was explicitly DISABLED during inference (`eval_only`), which forced it to use the default (not necessarily fastest) algorithm every time.
+
+The first batch takes slightly longer (a few seconds) while cuDNN benchmarks the algorithms. Every subsequent batch is faster. For an 800-page PDF with hundreds of batches, those few seconds are nothing compared to the cumulative speedup.
+
+### 3. AMP (Automatic Mixed Precision) — `src/adapters/ml/vgt_model_adapter.py` (line 119-122)
+
+**What changed:** Added `torch.amp.autocast("cuda")` context manager around the model inference call.
+
+**Before:**
+```python
+with suppress_logs():
+    VGTTrainer.test(doc_cfg, model)
+```
+
+**After:**
+```python
+use_amp = os.environ.get("CUDA_AMP", "").lower() in ("1", "true") and torch.cuda.is_available()
+amp_ctx = torch.amp.autocast("cuda") if use_amp else contextlib.nullcontext()
+
+with suppress_logs(), amp_ctx:
+    VGTTrainer.test(doc_cfg, model)
+```
+
+**Why:** AMP tells PyTorch to use half-precision (float16) for the heavy math operations inside the model — matrix multiplications, convolutions — while keeping full precision (float32) for sensitive operations like normalization and softmax. This gives:
+- **~1.5-2x speedup** because float16 operations are twice as fast on modern GPUs
+- **Half the GPU memory** per batch, which means you can potentially increase the batch size even further
+- **Negligible quality difference** because the sensitive operations stay at full precision
+
+**Only activates when:**
+1. The `CUDA_AMP=true` environment variable is set, AND
+2. A GPU is actually available (`torch.cuda.is_available()`)
+
+On CPU (your local machine), it does nothing — `contextlib.nullcontext()` is a no-op.
+
+### 4. docker-compose-gpu.yml Updated
+
+**What changed:** Added three new environment variables to the GPU service:
+
+```yaml
+environment:
+  - INFERENCE_BATCH_SIZE=4
+  - INFERENCE_NUM_WORKERS=2
+  - CUDA_AMP=true
+```
+
+**Why:** These activate all three optimizations when running on GPU:
+- **INFERENCE_BATCH_SIZE=4**: Process 4 pages at once. Start with 4, increase to 8 if GPU memory allows.
+- **INFERENCE_NUM_WORKERS=2**: 2 CPU threads prepare data while GPU computes. More workers = more CPU memory; 2 is a safe default.
+- **CUDA_AMP=true**: Enable half-precision inference for ~1.5-2x speedup.
+
+## Expected Combined Speedup
+
+For an 800-page PDF currently taking ~4 hours on GPU:
+- **Batch size 4**: ~4x fewer GPU passes → saves ~60-70% of inference time
+- **cudnn.benchmark**: ~10-15% faster per batch after auto-tuning
+- **AMP**: ~1.5-2x faster per batch
+
+Combined, these optimizations should reduce that 4-hour processing time to roughly **1-1.5 hours** for the same document. The exact speedup depends on the GPU model and available memory.
+
+## How to Test
+
+1. Build the GPU image: `docker compose -f docker-compose-gpu.yml build`
+2. Start: `docker compose -f docker-compose-gpu.yml up -d`
+3. Send a test PDF and compare processing time to before
+4. Monitor GPU usage with `nvidia-smi` — you should see higher GPU utilization and memory usage
+5. If you get out-of-memory errors, reduce `INFERENCE_BATCH_SIZE` to 2
+
+## How to Tune
+
+- **Out of memory?** Lower `INFERENCE_BATCH_SIZE` (try 2) or disable AMP (`CUDA_AMP=false`)
+- **Still have GPU memory headroom?** Increase `INFERENCE_BATCH_SIZE` to 8
+- **CPU bottleneck?** Increase `INFERENCE_NUM_WORKERS` to 4 (uses more RAM)

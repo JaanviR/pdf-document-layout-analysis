@@ -7,6 +7,8 @@ import logging
 import os
 import sys
 from pathlib import Path
+
+import torch
 from domain.PdfImages import PdfImages
 from domain.PdfSegment import PdfSegment
 from ports.services.ml_model_service import MLModelService
@@ -115,7 +117,10 @@ class VGTModelAdapter(MLModelService):
             doc_cfg.DATASETS.TEST = (dataset_name,)
             doc_cfg.freeze()
 
-            with suppress_logs():
+            use_amp = os.environ.get("CUDA_AMP", "").lower() in ("1", "true") and torch.cuda.is_available()
+            amp_ctx = torch.amp.autocast("cuda") if use_amp else contextlib.nullcontext()
+
+            with suppress_logs(), amp_ctx:
                 VGTTrainer.test(doc_cfg, model)
 
             predicted_segments = get_most_probable_pdf_segments(
