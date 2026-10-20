@@ -1,5 +1,13 @@
 # Huridocs Document Isolation Changes
 
+## Steps to Test
+
+- Copy/push these changed files to the GPU machine
+- Build with docker compose -f docker-compose-gpu.yml build
+- Start with docker compose -f docker-compose-gpu.yml up -d
+- Run python -m pytest src/tests/test_end_to_end.py -v inside the container
+- Watch especially for test_analyze_concurrent_requests_do_not_corrupt — that's the test that proves isolation works
+
 ## The Problem
 
 When your RAG agent sends multiple PDFs to Huridocs for processing, they queue up and process one at a time. An 800-page book takes ~4 hours on GPU, so if you send 2 books, the second one waits 4 hours before it even starts — total ~8 hours.
