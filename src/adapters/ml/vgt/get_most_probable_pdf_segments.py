@@ -30,12 +30,15 @@ def get_prediction_from_annotation(annotation, images_names, vgt_predictions_dic
     vgt_predictions_dict.setdefault(pdf_name, list()).append(prediction)
 
 
-def get_vgt_predictions(model_name: str) -> dict[str, list[Prediction]]:
-    output_dir: str = f"model_output_{model_name}"
-    model_output_json_path = join(str(ROOT_PATH), output_dir, "inference", "coco_instances_results.json")
+def get_vgt_predictions(model_name: str, output_dir: str | None = None, json_file_path: str | None = None) -> dict[str, list[Prediction]]:
+    if output_dir:
+        model_output_json_path = join(output_dir, "inference", "coco_instances_results.json")
+    else:
+        default_output_dir: str = f"model_output_{model_name}"
+        model_output_json_path = join(str(ROOT_PATH), default_output_dir, "inference", "coco_instances_results.json")
     annotations = json.loads(Path(model_output_json_path).read_text())
 
-    test_json_path = join(str(ROOT_PATH), "jsons", "test.json")
+    test_json_path = json_file_path or join(str(ROOT_PATH), "jsons", "test.json")
     coco_truth = json.loads(Path(test_json_path).read_text())
 
     images_names = {value["id"]: value["file_name"] for value in coco_truth["images"]}
@@ -123,9 +126,9 @@ def prediction_exists_for_page(page_pdf_name, vgt_predictions_dict):
     return page_pdf_name in vgt_predictions_dict
 
 
-def get_most_probable_pdf_segments(model_name: str, pdf_images_list: list[PdfImages], save_output: bool = False):
+def get_most_probable_pdf_segments(model_name: str, pdf_images_list: list[PdfImages], save_output: bool = False, output_dir: str | None = None, json_file_path: str | None = None):
     most_probable_pdf_segments: list[PdfSegment] = []
-    vgt_predictions_dict = get_vgt_predictions(model_name)
+    vgt_predictions_dict = get_vgt_predictions(model_name, output_dir=output_dir, json_file_path=json_file_path)
     pdf_features_list: list[PdfFeatures] = [pdf_images.pdf_features for pdf_images in pdf_images_list]
     for pdf_features in pdf_features_list:
         for page in pdf_features.pages:

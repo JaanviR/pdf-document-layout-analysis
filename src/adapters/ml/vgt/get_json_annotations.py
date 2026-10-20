@@ -1,12 +1,15 @@
 import json
 from os import makedirs
+from pathlib import Path
 from pdf_features import PdfToken
 from domain.PdfImages import PdfImages
 from configuration import DOCLAYNET_TYPE_BY_ID
 from configuration import JSONS_ROOT_PATH, JSON_TEST_FILE_PATH
 
 
-def save_annotations_json(annotations: list, width_height: list, images: list):
+def save_annotations_json(annotations: list, width_height: list, images: list, json_file_path: Path | None = None):
+    target_path = json_file_path or JSON_TEST_FILE_PATH
+
     images_dict = [
         {
             "id": i,
@@ -30,7 +33,8 @@ def save_annotations_json(annotations: list, width_height: list, images: list):
 
     coco_dict = {"info": info_dict, "images": images_dict, "categories": categories_dict, "annotations": annotations}
 
-    JSON_TEST_FILE_PATH.write_text(json.dumps(coco_dict))
+    makedirs(target_path.parent, exist_ok=True)
+    target_path.write_text(json.dumps(coco_dict))
 
 
 def get_annotation(index: int, image_id: str, token: PdfToken):
@@ -56,9 +60,7 @@ def get_annotations_for_document(annotations, images, index, pdf_images, width_h
             index += 1
 
 
-def get_annotations(pdf_images_list: list[PdfImages]):
-    makedirs(JSONS_ROOT_PATH, exist_ok=True)
-
+def get_annotations(pdf_images_list: list[PdfImages], json_file_path: Path | None = None):
     annotations = list()
     images = list()
     width_height = list()
@@ -68,4 +70,4 @@ def get_annotations(pdf_images_list: list[PdfImages]):
         get_annotations_for_document(annotations, images, index, pdf_images, width_height)
         index += sum([len(page.tokens) for page in pdf_images.pdf_features.pages])
 
-    save_annotations_json(annotations, width_height, images)
+    save_annotations_json(annotations, width_height, images, json_file_path=json_file_path)

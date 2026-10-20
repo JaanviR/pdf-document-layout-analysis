@@ -16,10 +16,11 @@ from configuration import IMAGES_ROOT_PATH, XMLS_PATH
 
 
 class PdfImages:
-    def __init__(self, pdf_features: PdfFeatures, pdf_images: list[Image], dpi: int = 72):
+    def __init__(self, pdf_features: PdfFeatures, pdf_images: list[Image], dpi: int = 72, images_dir: Path | str | None = None):
         self.pdf_features: PdfFeatures = pdf_features
         self.pdf_images: list[Image] = pdf_images
         self.dpi: int = dpi
+        self.images_dir: Path = Path(images_dir) if images_dir else IMAGES_ROOT_PATH
         self.save_images()
 
     def show_images(self, next_image_delay: int = 2):
@@ -30,17 +31,16 @@ class PdfImages:
             cv2.destroyAllWindows()
 
     def save_images(self):
-        makedirs(IMAGES_ROOT_PATH, exist_ok=True)
+        makedirs(self.images_dir, exist_ok=True)
         for image_index, image in enumerate(self.pdf_images):
             image_name = f"{self.pdf_features.file_name}_{image_index}.jpg"
-            image.save(join(IMAGES_ROOT_PATH, image_name))
+            image.save(join(self.images_dir, image_name))
+
+    def remove_images(self):
+        shutil.rmtree(self.images_dir, ignore_errors=True)
 
     @staticmethod
-    def remove_images():
-        shutil.rmtree(IMAGES_ROOT_PATH)
-
-    @staticmethod
-    def from_pdf_path(pdf_path: str | Path, pdf_name: str = "", xml_file_name: str = "", dpi: int = 72):
+    def from_pdf_path(pdf_path: str | Path, pdf_name: str = "", xml_file_name: str = "", dpi: int = 72, images_dir: Path | str | None = None):
         xml_path = None if not xml_file_name else Path(XMLS_PATH, xml_file_name)
 
         if xml_path and not xml_path.parent.exists():
@@ -54,7 +54,7 @@ class PdfImages:
             pdf_name = Path(pdf_path).parent.name if Path(pdf_path).name == "document.pdf" else Path(pdf_path).stem
             pdf_features.file_name = pdf_name
         pdf_images = convert_from_path(pdf_path, dpi=dpi)
-        return PdfImages(pdf_features, pdf_images, dpi)
+        return PdfImages(pdf_features, pdf_images, dpi, images_dir=images_dir)
 
     @staticmethod
     def _pdftohtml_stdout(pdf_path: str | Path, hidden: bool) -> bytes:
@@ -73,7 +73,7 @@ class PdfImages:
             return False
 
     @staticmethod
-    def from_pdf_path_capture_xml(pdf_path: str | Path, pdf_name: str = "", dpi: int = 72) -> tuple["PdfImages", str]:
+    def from_pdf_path_capture_xml(pdf_path: str | Path, pdf_name: str = "", dpi: int = 72, images_dir: Path | str | None = None) -> tuple["PdfImages", str]:
         if PdfFeatures.is_pdf_encrypted(pdf_path):
             subprocess.run(["qpdf", "--decrypt", "--replace-input", pdf_path])
 
@@ -91,4 +91,4 @@ class PdfImages:
             pdf_features.file_name = pdf_name
 
         pdf_images = convert_from_path(pdf_path, dpi=dpi)
-        return PdfImages(pdf_features, pdf_images, dpi), xml_content
+        return PdfImages(pdf_features, pdf_images, dpi, images_dir=images_dir), xml_content

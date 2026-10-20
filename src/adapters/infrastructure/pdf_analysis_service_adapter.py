@@ -1,4 +1,6 @@
+import tempfile
 import threading
+from pathlib import Path
 from typing import AnyStr
 from domain.PdfImages import PdfImages
 from domain.SegmentBox import SegmentBox
@@ -7,6 +9,12 @@ from ports.services.ml_model_service import MLModelService
 from ports.services.format_conversion_service import FormatConversionService
 from ports.repositories.file_repository import FileRepository
 from configuration import service_logger
+
+
+def _create_workspace() -> Path:
+    workspace = Path(tempfile.mkdtemp(prefix="pdla_"))
+    (workspace / "images").mkdir()
+    return workspace
 
 
 class PDFAnalysisServiceAdapter(PDFAnalysisService):
@@ -29,7 +37,10 @@ class PDFAnalysisServiceAdapter(PDFAnalysisService):
         pdf_path = self.file_repository.save_pdf(pdf_content)
         service_logger.info("Creating PDF images")
 
-        pdf_images_list: list[PdfImages] = [PdfImages.from_pdf_path(pdf_path, "", xml_filename)]
+        workspace = _create_workspace()
+        images_dir = workspace / "images"
+
+        pdf_images_list: list[PdfImages] = [PdfImages.from_pdf_path(pdf_path, "", xml_filename, images_dir=images_dir)]
 
         with self._predict_lock:
             predicted_segments = self.vgt_model_service.predict_document_layout(pdf_images_list)
@@ -39,7 +50,7 @@ class PDFAnalysisServiceAdapter(PDFAnalysisService):
 
         if parse_tables_and_math:
             service_logger.info("Parsing tables and formulas")
-            pdf_images_200_dpi = PdfImages.from_pdf_path(pdf_path, "", xml_filename, dpi=200)
+            pdf_images_200_dpi = PdfImages.from_pdf_path(pdf_path, "", xml_filename, dpi=200, images_dir=images_dir)
             self.format_conversion_service.convert_formula_to_latex(pdf_images_200_dpi, predicted_segments)
             self.format_conversion_service.convert_table_to_html(pdf_images_200_dpi, predicted_segments)
 
@@ -57,13 +68,16 @@ class PDFAnalysisServiceAdapter(PDFAnalysisService):
         pdf_path = self.file_repository.save_pdf(pdf_content)
         service_logger.info("Creating PDF images for fast analysis")
 
-        pdf_images_list: list[PdfImages] = [PdfImages.from_pdf_path(pdf_path, "", xml_filename)]
+        workspace = _create_workspace()
+        images_dir = workspace / "images"
+
+        pdf_images_list: list[PdfImages] = [PdfImages.from_pdf_path(pdf_path, "", xml_filename, images_dir=images_dir)]
 
         with self._predict_lock:
             predicted_segments = self.fast_model_service.predict_layout_fast(pdf_images_list)
 
         if parse_tables_and_math:
-            pdf_images_200_dpi = PdfImages.from_pdf_path(pdf_path, "", xml_filename, dpi=200)
+            pdf_images_200_dpi = PdfImages.from_pdf_path(pdf_path, "", xml_filename, dpi=200, images_dir=images_dir)
             self.format_conversion_service.convert_formula_to_latex(pdf_images_200_dpi, predicted_segments)
             self.format_conversion_service.convert_table_to_html(pdf_images_list[0], predicted_segments)
 
@@ -79,8 +93,11 @@ class PDFAnalysisServiceAdapter(PDFAnalysisService):
         pdf_path = self.file_repository.save_pdf(pdf_content)
         service_logger.info("Creating PDF images")
 
+        workspace = _create_workspace()
+        images_dir = workspace / "images"
+
         with self._predict_lock:
-            pdf_images, xml_content = PdfImages.from_pdf_path_capture_xml(pdf_path)
+            pdf_images, xml_content = PdfImages.from_pdf_path_capture_xml(pdf_path, images_dir=images_dir)
             pdf_images_list: list[PdfImages] = [pdf_images]
 
             predicted_segments = self.vgt_model_service.predict_document_layout(pdf_images_list)
@@ -100,8 +117,11 @@ class PDFAnalysisServiceAdapter(PDFAnalysisService):
         pdf_path = self.file_repository.save_pdf(pdf_content)
         service_logger.info("Creating PDF images for fast analysis")
 
+        workspace = _create_workspace()
+        images_dir = workspace / "images"
+
         with self._predict_lock:
-            pdf_images, xml_content = PdfImages.from_pdf_path_capture_xml(pdf_path)
+            pdf_images, xml_content = PdfImages.from_pdf_path_capture_xml(pdf_path, images_dir=images_dir)
             pdf_images_list: list[PdfImages] = [pdf_images]
 
             predicted_segments = self.fast_model_service.predict_layout_fast(pdf_images_list)

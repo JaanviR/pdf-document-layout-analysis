@@ -1,3 +1,4 @@
+import glob
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -13,13 +14,16 @@ from pdf_token_type_labels import TokenType
 class FakeModelService:
     def __init__(self):
         self.predict_calls = 0
+        self.received_images_dirs = []
 
     def predict_document_layout(self, pdf_images):
         self.predict_calls += 1
+        self.received_images_dirs.append(pdf_images[0].images_dir)
         return [PdfSegment(1, Rectangle.from_width_height(0, 0, 10, 10), "hello", TokenType.TEXT, "")]
 
     def predict_layout_fast(self, pdf_images):
         self.predict_calls += 1
+        self.received_images_dirs.append(pdf_images[0].images_dir)
         return [PdfSegment(1, Rectangle.from_width_height(0, 0, 10, 10), "hello", TokenType.TEXT, "")]
 
 
@@ -74,3 +78,34 @@ class TestPDFAnalysisServiceAdapterWithXml(TestCase):
 
     def test_analyze_pdf_layout_fast_with_xml(self):
         self._assert_with_xml_result("analyze_pdf_layout_fast_with_xml")
+
+    def test_images_go_to_workspace_not_global(self):
+        adapter, model_service = self._build_adapter()
+        pdf_content = Path(ROOT_PATH, "test_pdfs", "regular.pdf").read_bytes()
+
+        adapter.analyze_pdf_layout_with_xml(pdf_content)
+
+        images_dir = model_service.received_images_dirs[0]
+        self.assertNotEqual(Path(images_dir), IMAGES_ROOT_PATH)
+        self.assertTrue(str(images_dir).startswith(tempfile.gettempdir()))
+
+    def test_two_documents_get_different_workspaces(self):
+        adapter, model_service = self._build_adapter()
+        pdf_content = Path(ROOT_PATH, "test_pdfs", "regular.pdf").read_bytes()
+
+        adapter.analyze_pdf_layout_with_xml(pdf_content)
+        adapter.analyze_pdf_layout_with_xml(pdf_content)
+
+        dir_1 = model_service.received_images_dirs[0]
+        dir_2 = model_service.received_images_dirs[1]
+        self.assertNotEqual(dir_1, dir_2)
+
+    def test_workspace_contains_page_images(self):
+        adapter, model_service = self._build_adapter()
+        pdf_content = Path(ROOT_PATH, "test_pdfs", "regular.pdf").read_bytes()
+
+        adapter.analyze_pdf_layout_with_xml(pdf_content)
+
+        images_dir = model_service.received_images_dirs[0]
+        jpg_files = list(Path(images_dir).glob("*.jpg"))
+        self.assertGreater(len(jpg_files), 0)

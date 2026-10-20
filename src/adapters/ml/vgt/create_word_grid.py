@@ -80,18 +80,19 @@ def get_grid_words_dict(tokens: list[PdfToken]):
     }
 
 
-def create_word_grid(pdf_features_list: list[PdfFeatures]):
-    makedirs(WORD_GRIDS_PATH, exist_ok=True)
+def create_word_grid(pdf_features_list: list[PdfFeatures], word_grids_dir: str | None = None):
+    target_dir = word_grids_dir or WORD_GRIDS_PATH
+    makedirs(target_dir, exist_ok=True)
 
     for pdf_features in pdf_features_list:
         for page in pdf_features.pages:
             image_id = f"{pdf_features.file_name}_{page.page_number - 1}"
-            if exists(join(WORD_GRIDS_PATH, image_id + ".pkl")):
+            if exists(join(target_dir, image_id + ".pkl")):
                 continue
             grid_words_dict = get_grid_words_dict(page.tokens)
-            with open(join(WORD_GRIDS_PATH, f"{image_id}.pkl"), mode="wb") as file:
+            with open(join(target_dir, f"{image_id}.pkl"), mode="wb") as file:
                 pickle.dump(grid_words_dict, file)
 
 
-def remove_word_grids():
-    shutil.rmtree(WORD_GRIDS_PATH, ignore_errors=True)
+def remove_word_grids(word_grids_dir: str | None = None):
+    shutil.rmtree(word_grids_dir or WORD_GRIDS_PATH, ignore_errors=True)

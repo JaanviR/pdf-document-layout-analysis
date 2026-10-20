@@ -1,8 +1,12 @@
 import contextlib
+import shutil
+import tempfile
+import uuid
 import warnings
 import logging
 import os
 import sys
+from pathlib import Path
 from domain.PdfImages import PdfImages
 from domain.PdfSegment import PdfSegment
 from ports.services.ml_model_service import MLModelService
@@ -15,7 +19,6 @@ from adapters.ml.vgt.create_word_grid import create_word_grid, remove_word_grids
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.data.datasets import register_coco_instances
 from detectron2.data import DatasetCatalog
-from configuration import JSON_TEST_FILE_PATH, IMAGES_ROOT_PATH
 
 
 class DevNull:
@@ -83,28 +86,54 @@ with suppress_logs():
 
 class VGTModelAdapter(MLModelService):
 
-    def _register_data(self) -> None:
-        try:
-            DatasetCatalog.remove("predict_data")
-        except KeyError:
-            pass
-
-        register_coco_instances("predict_data", {}, JSON_TEST_FILE_PATH, IMAGES_ROOT_PATH)
-
     def predict_document_layout(self, pdf_images: list[PdfImages]) -> list[PdfSegment]:
-        create_word_grid([pdf_images_obj.pdf_features for pdf_images_obj in pdf_images])
-        get_annotations(pdf_images)
+        workspace_id = uuid.uuid4().hex[:8]
+        workspace_dir = Path(pdf_images[0].images_dir).parent
+        word_grids_dir = str(workspace_dir / "word_grids")
+        json_file_path = workspace_dir / "jsons" / "test.json"
+        output_dir = str(workspace_dir / "output")
+        dataset_name = f"predict_data_{workspace_id}"
 
-        self._register_data()
-        with suppress_logs():
-            VGTTrainer.test(configuration, model)
+        try:
+            create_word_grid(
+                [pdf_images_obj.pdf_features for pdf_images_obj in pdf_images],
+                word_grids_dir=word_grids_dir,
+            )
+            get_annotations(pdf_images, json_file_path=json_file_path)
 
-        predicted_segments = get_most_probable_pdf_segments("doclaynet", pdf_images, False)
+            try:
+                DatasetCatalog.remove(dataset_name)
+            except KeyError:
+                pass
+            register_coco_instances(
+                dataset_name, {}, str(json_file_path), str(pdf_images[0].images_dir),
+            )
 
-        PdfImages.remove_images()
-        remove_word_grids()
+            doc_cfg = configuration.clone()
+            doc_cfg.defrost()
+            doc_cfg.OUTPUT_DIR = output_dir
+            doc_cfg.DATASETS.TEST = (dataset_name,)
+            doc_cfg.freeze()
 
-        return get_reading_orders(pdf_images, predicted_segments)
+            with suppress_logs():
+                VGTTrainer.test(doc_cfg, model)
+
+            predicted_segments = get_most_probable_pdf_segments(
+                "doclaynet", pdf_images, False,
+                output_dir=output_dir,
+                json_file_path=str(json_file_path),
+            )
+
+            return get_reading_orders(pdf_images, predicted_segments)
+        finally:
+            try:
+                DatasetCatalog.remove(dataset_name)
+            except KeyError:
+                pass
+            for pdf_img in pdf_images:
+                pdf_img.remove_images()
+            remove_word_grids(word_grids_dir=word_grids_dir)
+            shutil.rmtree(workspace_dir, ignore_errors=True)
 
     def predict_layout_fast(self, pdf_images: list[PdfImages]) -> list[PdfSegment]:
         raise NotImplementedError("Fast prediction should be handled by FastTrainerAdapter")
