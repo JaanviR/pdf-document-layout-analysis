@@ -16,7 +16,7 @@ services:
 
   pdf-document-layout-analysis-gpu:
     container_name: pdf-document-layout-analysis-gpu
-    entrypoint: [ "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--chdir", "./src", "drivers.rest.app:app", "--bind", "0.0.0.0:5060", "--timeout", "10000"]
+    entrypoint: [ "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "${PDF_WORKERS:-2}", "--chdir", "./src", "drivers.rest.app:app", "--bind", "0.0.0.0:5060", "--timeout", "10000"]
     init: true
     restart: unless-stopped
     build:

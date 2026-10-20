@@ -636,3 +636,99 @@ Combined, these optimizations should reduce that 4-hour processing time to rough
 - **Out of memory?** Lower `INFERENCE_BATCH_SIZE` (try 2) or disable AMP (`CUDA_AMP=false`)
 - **Still have GPU memory headroom?** Increase `INFERENCE_BATCH_SIZE` to 8
 - **CPU bottleneck?** Increase `INFERENCE_NUM_WORKERS` to 4 (uses more RAM)
+
+---
+
+# Phase 3: Parallel Document Processing
+
+## The Problem
+
+Even with document isolation (Phase 1) and speed optimizations (Phase 2), if your RAG agent sends 5 PDFs at the same time, they still process **one at a time**. The service runs a single container with a single worker — the second PDF waits for the first to finish, the third waits for the second, and so on.
+
+## The Solution
+
+Increase Gunicorn from 1 worker to **2 workers** inside the same container. Gunicorn workers are separate processes — each one loads its own copy of the VGT model and can process a document independently. When your RAG agent sends 2 PDFs, Gunicorn routes them to different workers that process simultaneously.
+
+```
+Your RAG Agent
+      ↓
+  Gunicorn (port 5060)  ← same port, same container, no changes to your agent
+      ↓ routes to a free worker
+  ┌──────────┬──────────┐
+  │ Worker 1 │ Worker 2 │    ← each is a separate process with its own model copy
+  │ (Doc A)  │ (Doc B)  │    ← processing at the same time
+  └──────────┴──────────┘
+        shared GPU (CUDA time-slices between them)
+```
+
+**Your RAG agent needs zero changes** — it still sends requests to `localhost:5060`.
+
+## How GPU Sharing Works
+
+Both workers share the same physical GPU. NVIDIA's CUDA driver handles this automatically through "time-slicing" — it gives Worker 1 the GPU for a bit, then Worker 2, back and forth. Each worker has its own copy of the VGT model in GPU memory.
+
+This means:
+- 2 documents that each take 1.5 hours solo might take ~2 hours total (not 3 hours) because the GPU switches between them efficiently
+- The key win is **latency for the second document** — instead of waiting 1.5 hours before it even starts, it starts immediately
+
+## File Changes
+
+### Modified: `docker-compose-gpu.yml`
+
+**Only one line changed** — the entrypoint now includes `-w ${PDF_WORKERS:-2}`:
+
+**Before:**
+```yaml
+entrypoint: [ "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--chdir", "./src", "drivers.rest.app:app", "--bind", "0.0.0.0:5060", "--timeout", "10000"]
+```
+
+**After:**
+```yaml
+entrypoint: [ "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "${PDF_WORKERS:-2}", "--chdir", "./src", "drivers.rest.app:app", "--bind", "0.0.0.0:5060", "--timeout", "10000"]
+```
+
+**What `-w 2` does:** Tells Gunicorn to fork 2 worker processes instead of the default 1. Each worker is a completely separate Python process. When a request comes in and Worker 1 is busy, Gunicorn automatically routes it to Worker 2.
+
+**Why this is safe:** Phase 1 gave each document its own workspace (no file collisions). Each Gunicorn worker process loads its own model copy and has its own `_predict_lock` (since `threading.Lock` is per-process). So two workers processing two documents simultaneously will never interfere with each other.
+
+**Configurable via `PDF_WORKERS` env var** — defaults to 2, can be changed without rebuilding:
+```bash
+PDF_WORKERS=3 docker compose -f docker-compose-gpu.yml up -d
+```
+
+## How to Use
+
+```bash
+# Start with default 2 workers
+docker compose -f docker-compose-gpu.yml up -d
+
+# Or start with 3 workers
+PDF_WORKERS=3 docker compose -f docker-compose-gpu.yml up -d
+
+# Watch GPU memory to make sure workers fit
+nvidia-smi
+```
+
+## How to Tune
+
+- **Out of GPU memory with 2 workers?** Reduce to 1 worker (`PDF_WORKERS=1`) or lower `INFERENCE_BATCH_SIZE`
+- **GPU has plenty of memory?** Try 3 workers (`PDF_WORKERS=3`)
+
+## Important Notes
+
+- Each worker loads its own copy of the VGT model into GPU memory (~1-2 GB per worker). Make sure your GPU has enough memory for all workers plus the batch size.
+- Container startup will take longer because each worker loads the model sequentially during fork.
+- If you set `PDF_WORKERS=1`, it behaves exactly like before — one document at a time.
+
+---
+
+# Summary of All Phases
+
+| Phase | What it does | Effect |
+|-------|-------------|--------|
+| **Phase 1: Document Isolation** | Each document gets its own temp workspace | Makes parallel processing *safe* (no file collisions) |
+| **Phase 2: Speed Optimizations** | Batch inference, cudnn.benchmark, AMP | Makes each document *faster* (~1-1.5 hrs instead of ~4 hrs) |
+| **Phase 3: Gunicorn Workers** | 2 Gunicorn workers instead of 1 | Makes multiple documents process *at the same time* |
+
+**Before all changes:** 2 books × 4 hours each = **8 hours total** (sequential)
+**After all changes:** 2 books × ~1.5 hours each = **~1.5-2 hours total** (parallel, with speed optimizations)
