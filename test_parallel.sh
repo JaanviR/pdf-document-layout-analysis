@@ -8,14 +8,16 @@
 #   ./test_parallel.sh --docs-only      # skip restart, just re-run with new docs
 #
 # Edit the DOCUMENTS and SETTINGS sections below, then run.
-# Change RESTART to "false" if you only changed document names.
 # =============================================================================
 
 set -e
 
 # --------------- DOCUMENTS ---------------
-DOC1="../../books/test/doc2.pdf"
-DOC2="../../books/test/doc3.pdf"
+# Add or remove lines — works with any number of docs
+DOCS=(
+    "../../books/test/doc2.pdf"
+    "../../books/test/doc3.pdf"
+)
 
 # --------------- SETTINGS ----------------
 # Change these → service restarts automatically
@@ -31,6 +33,7 @@ RESULTS_DIR="../../test_results"
 
 SERVICE="pdf-document-layout-analysis-gpu"
 URL="http://localhost:5060"
+NUM_DOCS=${#DOCS[@]}
 
 # --docs-only flag skips restart
 SKIP_RESTART=false
@@ -43,8 +46,10 @@ mkdir -p "$RESULTS_DIR"
 echo "========================================"
 echo "  Parallel Processing Test"
 echo "========================================"
-echo "  Doc 1:       $DOC1"
-echo "  Doc 2:       $DOC2"
+echo "  Documents:   $NUM_DOCS"
+for i in $(seq 0 $((NUM_DOCS - 1))); do
+    echo "    [$((i+1))] ${DOCS[$i]}"
+done
 echo "  Workers:     $PDF_WORKERS"
 echo "  Batch size:  $INFERENCE_BATCH_SIZE"
 echo "  Num workers: $INFERENCE_NUM_WORKERS"
@@ -53,7 +58,7 @@ echo "========================================"
 echo ""
 
 # Verify docs exist
-for doc in "$DOC1" "$DOC2"; do
+for doc in "${DOCS[@]}"; do
     if [ ! -f "$doc" ]; then
         echo "ERROR: File not found: $doc"
         exit 1
@@ -66,7 +71,6 @@ done
 if [ "$SKIP_RESTART" = true ]; then
     echo "[skip] --docs-only: keeping current service running"
     echo ""
-    # Quick check that service is actually up
     if ! curl -s "$URL/" > /dev/null 2>&1; then
         echo "ERROR: Service is not running. Run without --docs-only first."
         exit 1
@@ -82,7 +86,6 @@ else
     CUDA_AMP=$CUDA_AMP \
     docker compose -f "$COMPOSE_FILE" up -d 2>&1
 
-    # Wait for service to respond
     echo "       Waiting for service..."
     for i in $(seq 1 300); do
         if curl -s "$URL/" > /dev/null 2>&1; then
@@ -97,7 +100,6 @@ else
         sleep 1
     done
 
-    # Wait for warmup
     echo "       Waiting for worker warmup..."
     for i in $(seq 1 300); do
         if docker logs "$SERVICE" 2>&1 | grep -q "All workers warmed up"; then
@@ -113,7 +115,7 @@ else
 fi
 
 # =========================================================================
-# GPU MEMORY — IDLE (after warmup, before processing)
+# GPU MEMORY — IDLE
 # =========================================================================
 echo "[gpu] Memory after warmup (idle):"
 GPU_IDLE=$(nvidia-smi --query-gpu=memory.used,memory.free,memory.total --format=csv,noheader)
@@ -128,9 +130,8 @@ echo ""
 # =========================================================================
 # SEQUENTIAL TEST
 # =========================================================================
-echo "[2/3] Sequential test (one after the other)..."
+echo "[2/3] Sequential test ($NUM_DOCS docs, one after the other)..."
 
-# Start GPU memory monitor in background
 > /tmp/gpu_seq_samples.txt
 (
     while true; do
@@ -142,8 +143,9 @@ GPU_MON_PID=$!
 
 SEQ_START=$(date +%s%N)
 
-curl -s -X POST "$URL/" -F "file=@${DOC1}" > "$RESULTS_DIR/seq_1.json"
-curl -s -X POST "$URL/" -F "file=@${DOC2}" > "$RESULTS_DIR/seq_2.json"
+for i in $(seq 0 $((NUM_DOCS - 1))); do
+    curl -s -X POST "$URL/" -F "file=@${DOCS[$i]}" > "$RESULTS_DIR/seq_$((i+1)).json"
+done
 
 SEQ_END=$(date +%s%N)
 kill $GPU_MON_PID 2>/dev/null; wait $GPU_MON_PID 2>/dev/null || true
@@ -152,21 +154,19 @@ SEQ_MS=$(( (SEQ_END - SEQ_START) / 1000000 ))
 SEQ_SEC=$(echo "scale=2; $SEQ_MS / 1000" | bc)
 SEQ_PEAK=$(sort -n /tmp/gpu_seq_samples.txt 2>/dev/null | tail -1 || echo "N/A")
 
-SEG1=$(python3 -c "import json; print(len(json.load(open('$RESULTS_DIR/seq_1.json'))))" 2>/dev/null || echo "error")
-SEG2=$(python3 -c "import json; print(len(json.load(open('$RESULTS_DIR/seq_2.json'))))" 2>/dev/null || echo "error")
-
 echo "       Time:     ${SEQ_SEC}s"
 echo "       Peak GPU: ${SEQ_PEAK} MiB"
-echo "       Doc 1:    $SEG1 segments"
-echo "       Doc 2:    $SEG2 segments"
+for i in $(seq 0 $((NUM_DOCS - 1))); do
+    SEGS=$(python3 -c "import json; print(len(json.load(open('$RESULTS_DIR/seq_$((i+1)).json'))))" 2>/dev/null || echo "error")
+    echo "       Doc $((i+1)):    $SEGS segments"
+done
 echo ""
 
 # =========================================================================
 # PARALLEL TEST
 # =========================================================================
-echo "[3/3] Parallel test (both at the same time)..."
+echo "[3/3] Parallel test ($NUM_DOCS docs, all at the same time)..."
 
-# Start GPU memory monitor in background
 > /tmp/gpu_par_samples.txt
 (
     while true; do
@@ -178,13 +178,15 @@ GPU_MON_PID=$!
 
 PAR_START=$(date +%s%N)
 
-curl -s -X POST "$URL/" -F "file=@${DOC1}" > "$RESULTS_DIR/par_1.json" &
-PID1=$!
-curl -s -X POST "$URL/" -F "file=@${DOC2}" > "$RESULTS_DIR/par_2.json" &
-PID2=$!
+PIDS=()
+for i in $(seq 0 $((NUM_DOCS - 1))); do
+    curl -s -X POST "$URL/" -F "file=@${DOCS[$i]}" > "$RESULTS_DIR/par_$((i+1)).json" &
+    PIDS+=($!)
+done
 
-wait $PID1
-wait $PID2
+for pid in "${PIDS[@]}"; do
+    wait $pid
+done
 
 PAR_END=$(date +%s%N)
 kill $GPU_MON_PID 2>/dev/null; wait $GPU_MON_PID 2>/dev/null || true
@@ -193,13 +195,12 @@ PAR_MS=$(( (PAR_END - PAR_START) / 1000000 ))
 PAR_SEC=$(echo "scale=2; $PAR_MS / 1000" | bc)
 PAR_PEAK=$(sort -n /tmp/gpu_par_samples.txt 2>/dev/null | tail -1 || echo "N/A")
 
-PSEG1=$(python3 -c "import json; print(len(json.load(open('$RESULTS_DIR/par_1.json'))))" 2>/dev/null || echo "error")
-PSEG2=$(python3 -c "import json; print(len(json.load(open('$RESULTS_DIR/par_2.json'))))" 2>/dev/null || echo "error")
-
 echo "       Time:     ${PAR_SEC}s"
 echo "       Peak GPU: ${PAR_PEAK} MiB"
-echo "       Doc 1:    $PSEG1 segments"
-echo "       Doc 2:    $PSEG2 segments"
+for i in $(seq 0 $((NUM_DOCS - 1))); do
+    PSEGS=$(python3 -c "import json; print(len(json.load(open('$RESULTS_DIR/par_$((i+1)).json'))))" 2>/dev/null || echo "error")
+    echo "       Doc $((i+1)):    $PSEGS segments"
+done
 echo ""
 
 # =========================================================================
@@ -210,6 +211,7 @@ echo "  RESULTS"
 echo "========================================"
 echo ""
 echo "  Settings:    workers=$PDF_WORKERS  batch=$INFERENCE_BATCH_SIZE  amp=$CUDA_AMP"
+echo "  Documents:   $NUM_DOCS"
 echo ""
 echo "  Sequential:  ${SEQ_SEC}s   (peak GPU: ${SEQ_PEAK} MiB)"
 echo "  Parallel:    ${PAR_SEC}s   (peak GPU: ${PAR_PEAK} MiB)"
@@ -222,27 +224,27 @@ if [ "$SEQ_MS" -gt 0 ] && [ "$PAR_MS" -gt 0 ]; then
     echo ""
 fi
 
-# Validate results
+# Validate: compare sequential vs parallel for each doc
 python3 -c "
 import json
 
-files = [
-    ('$RESULTS_DIR/seq_1.json', '$RESULTS_DIR/par_1.json', 'Doc 1'),
-    ('$RESULTS_DIR/seq_2.json', '$RESULTS_DIR/par_2.json', 'Doc 2'),
-]
+num_docs = $NUM_DOCS
+results_dir = '$RESULTS_DIR'
 
 all_pass = True
-for seq_f, par_f, label in files:
+for i in range(1, num_docs + 1):
+    seq_f = f'{results_dir}/seq_{i}.json'
+    par_f = f'{results_dir}/par_{i}.json'
     try:
         seq = json.load(open(seq_f))
         par = json.load(open(par_f))
         if len(seq) == len(par):
-            print(f'  {label}: PASS ({len(seq)} segments match)')
+            print(f'  Doc {i}: PASS ({len(seq)} segments match)')
         else:
-            print(f'  {label}: MISMATCH (sequential={len(seq)}, parallel={len(par)})')
+            print(f'  Doc {i}: MISMATCH (sequential={len(seq)}, parallel={len(par)})')
             all_pass = False
     except Exception as e:
-        print(f'  {label}: ERROR ({e})')
+        print(f'  Doc {i}: ERROR ({e})')
         all_pass = False
 
 print()
@@ -250,12 +252,11 @@ if all_pass:
     print('  All results match. Parallel processing is working correctly.')
 else:
     print('  WARNING: Some results differ. Check logs:')
-    print('    docker logs $SERVICE 2>&1 | tail -30')
+    print('    docker logs pdf-document-layout-analysis-gpu 2>&1 | tail -30')
 "
 
 echo ""
 echo "  Results saved to: $RESULTS_DIR/"
 echo "========================================"
 
-# Cleanup
 rm -f /tmp/gpu_seq_samples.txt /tmp/gpu_par_samples.txt
