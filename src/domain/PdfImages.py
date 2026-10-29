@@ -46,6 +46,9 @@ class PdfImages:
         if xml_path and not xml_path.parent.exists():
             os.makedirs(xml_path.parent, exist_ok=True)
 
+        if xml_path is None and images_dir:
+            xml_path = Path(images_dir).parent / "pdf_etree.xml"
+
         pdf_features: PdfFeatures = PdfFeatures.from_pdf_path(pdf_path, xml_path)
 
         if pdf_name:
