@@ -131,6 +131,8 @@ class VGTModelAdapter(MLModelService):
 
             return get_reading_orders(pdf_images, predicted_segments)
         finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             try:
                 DatasetCatalog.remove(dataset_name)
             except KeyError:

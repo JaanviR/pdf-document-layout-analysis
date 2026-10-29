@@ -15,8 +15,8 @@ set -e
 # --------------- DOCUMENTS ---------------
 # Add or remove lines — works with any number of docs
 DOCS=(
-    "../../books/test/doc2.pdf"
-    "../../books/test/doc3.pdf"
+    "../../books/APBiology.pdf"
+    "../../books/test/doc5.pdf"
 )
 
 # --------------- SETTINGS ----------------
