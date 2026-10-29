@@ -104,6 +104,7 @@ WORKDIR /app
 
 COPY --from=builder --chown=python:python /app/.venv /app/.venv
 COPY --chown=python:python --chmod=755 ./start.sh ./start.sh
+COPY --chown=python:python --chmod=755 ./start-gpu.sh ./start-gpu.sh
 COPY --chown=python:python ./src/download_models.py ./src/download_models.py
 COPY --chown=python:python ./src/configuration.py ./src/configuration.py
 
